@@ -1,55 +1,70 @@
+import itertools
 import multiprocessing as mp
+import os
 
 from Config import Config
 from BaseExecutor import BaseExecutor
-from CommandGenerator import CommandGenerator
 from ProxyService import ProxyService
 
-# Methods used in multiprocessing has to be defined in global scope (https://bugs.python.org/issue25053)
-get_thread_id = lambda: getattr(mp.current_process(), 'name')
+class CommandEnhancer:
+    def __init__(self, initializer, decorator):
+        self.initializer = initializer
+        self.decorator = decorator
+
+class CommandTemplate:
+    def __init__(self, template, generators):
+        self.template = template
+        self.generators = generators
+
+    def build(self):
+        var_combinations = itertools.product(*self.generators)
+        commands = [self.template(*var) for var in var_combinations]
+        return commands
 
 class EnhancedExecutor(BaseExecutor):
-    def default_proxy_joiner(c, p):
-        return f"{c} --proxy {p}"
-
-    def __init__(self, template, replace_dict={}, workers=1, proxy_joiner=None):
-        self.commandGenerator = CommandGenerator(template, replace_dict)
-        self.proxyService = ProxyService()
+    def __init__(self, command_template, command_enhancer, workers=1):
+        self.commands = command_template.build()
+        self.command_enhancer = command_enhancer
         self.workers = workers
-        self.proxy_joiner = proxy_joiner if proxy_joiner != None else EnhancedExecutor.default_proxy_joiner
 
-    def run_commands_split(self, commands_split):
-        print(f">> Running [{get_thread_id()}] with processes [{commands_split}].")
-        proxy = self.proxyService.generate_proxy() if Config.use_proxy else ""
-        results = []
-        for command in commands_split:
-            for i in range(Config.max_attempts):
-                enhanced_command = self.proxy_joiner(command, proxy) if Config.use_proxy else command
-                result = self.run_command(enhanced_command)
-                if result.get('returncode', None) == 0:
-                    results += [result]
-                    break
-                proxy = self.proxyService.generate_proxy() if Config.use_proxy else ""
-        print(f"<< Finished [{get_thread_id()}] with processes [{commands_split}].")
-        return results
+    def run_commands_split(self, command, mp_dict):
+        pid = os.getpid()
+        if mp_dict.get(pid) is None:
+            mp_dict[pid] = self.command_enhancer.initializer()
+        for i in range(Config.max_attempts):
+            enhanced_command = self.command_enhancer.decorator(command, mp_dict[pid])
+            print(f">> Running [{pid}] attempt#[{i}] with processes [{enhanced_command}].")
+            output = self.run_command(enhanced_command)
+            if output.get('returncode', None) == 0:
+                break
+            print(f"** Command failed. Reinitializing mp cache...")
+            mp_dict[pid] = self.command_enhancer.initializer()
+        print(f"<< Finished [{pid}] attempt#{i}/{Config.max_attempts} with processes [{enhanced_command}].")
+        return output
 
     def run_commands_on_workers(self):
-        with mp.Pool(processes=self.workers) as pool:
-            print(f">> Multiprocessing pool [{self.workers}] loaded.")
-            splitted_commands = self.commandGenerator.split_commands(self.workers)
-            workers_handles = [pool.apply_async(self.run_commands_split, args=[commands_split]) for commands_split in splitted_commands]
-            splitted_results = [worker.get(Config.wait_time) for worker in workers_handles]
-            results = [result for results_split in splitted_results for result in results_split]
-            print(f">> Multiprocessing pool [{self.workers}] unloaded.")
+        with mp.Pool(processes=self.workers) as pool, mp.Manager() as manager:
+            mp_dict = manager.dict()
+            print(f">> Multiprocessing pool {(self.workers, pool, mp_dict)} loaded.")
+            starargs = ((command, mp_dict) for command in self.commands)
+            results = pool.starmap(self.run_commands_split, starargs)
+            print(f">> Multiprocessing pool {(self.workers, pool, mp_dict)} unloaded.")
         return results
 
 
 if __name__ == '__main__':
-    test_template = "echo <OPT1> <OPT2>"
-    test_replace_dict = {
-        "<OPT1>": ["1", "2", 3],
-        "<OPT2>": [True, False, "Tomato"], }
-    test_workers = 4
-    enhancedExecutor = EnhancedExecutor(test_template, test_replace_dict, test_workers)
+    proxy_service = ProxyService()
+    initializer = proxy_service.generate_proxy
+    def decorator(c, p):  # multiprocessing hates lambdas
+        return f"{c} --proxy {p}" if p is not None else c
+    curl_proxy_decorator = CommandEnhancer(initializer, decorator)
+
+    echo_template = lambda a, b: f"echo {a} {b}"
+    echo_vars_1 = [1, 2, 3]
+    echo_vars_2 = [4, 5, 6]
+    command_template = CommandTemplate(echo_template, [echo_vars_1, echo_vars_2])
+
+    test_workers = 2
+    enhancedExecutor = EnhancedExecutor(command_template, curl_proxy_decorator, test_workers)
     results = enhancedExecutor.run_commands_on_workers()
-    print(f"results:{results}, size:{len(results)}")
+    print(f"Results = {results}\nSuccesses: {sum([r['returncode'] == 0 for r in results])}/{len(results)}")
