@@ -4,7 +4,7 @@ from Config import Config
 from BaseExecutor import BaseExecutor
 
 class ProxyService:
-    proxy_command = "curl -sSf https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt"
+    proxy_command = 'curl "http://spys.me/proxy.txt"'
 
     def __init__(self):
         self.baseExecutor = BaseExecutor()
@@ -14,7 +14,8 @@ class ProxyService:
             print ("Config.use_proxy has not been set. Proxy will not be generated.")
             return ""
         proxy_result = self.baseExecutor.run_command(ProxyService.proxy_command)
-        proxies = proxy_result['stdout'].strip().split("\n")
+        raw_proxies = proxy_result['stdout'].strip().split("\n")
+        proxies = [p[ :p.index(' ')] for p in raw_proxies if "-S" in p and " +" in p]
         proxy = random.choice(proxies)
         return proxy
 

@@ -7,4 +7,4 @@ class Config:
     use_proxy = True
     max_attempts = 30
     timeout = 2.0
-    max_pages = 400
+    # max_pages = 400
