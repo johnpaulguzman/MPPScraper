@@ -5,7 +5,8 @@ import time
 from Config import Config
 
 class BaseExecutor:
-    def run_command(self, command):
+    @staticmethod
+    def run_command(command):
         print(f">> Running: {command}")
         process = sp.Popen(shlex.split(command), stdout=sp.PIPE, stderr=sp.PIPE)
         start_time = time.time()
@@ -19,5 +20,5 @@ class BaseExecutor:
 
 
 if __name__ == '__main__':
-    base_executor = BaseExecutor()
-    base_executor.run_command("echo Hello")
+    result = BaseExecutor.run_command("echo World!")
+    assert result['returncode'] == 0
