@@ -2,7 +2,6 @@ import shlex
 import subprocess as sp
 import time
 
-from Config import Config
 
 class BaseExecutor:
     @staticmethod
@@ -15,7 +14,6 @@ class BaseExecutor:
         duration = time.time() - start_time
         result = {'command': command, 'stdout': stdout, 'stderr': stderr, 'returncode': returncode, 'duration': duration}
         print(f"<< Finished: {command} | returncode: {returncode} | duration: {duration}")
-        time.sleep(Config.timeout)
         return result
 
 

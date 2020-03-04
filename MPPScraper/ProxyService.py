@@ -1,23 +1,30 @@
-import random
+import re
+import time
 
 from Config import Config
 from BaseExecutor import BaseExecutor
 
+
 class ProxyService:
     @staticmethod
-    def generate_proxy():  # Taken from https://vip.squidproxies.com/index.php?action=assignedproxies
+    def generate_proxy(idx=0):
         if not Config.use_proxy:
             print ("Config.use_proxy has not been set. Proxy will not be generated.")
             return ""
-        proxies_raw = """
-170.130.58.171:8800
-170.130.58.101:8800
-        """ # socks5h://127.0.0.1:9060
-        proxies = list(map(lambda s: s.strip(), proxies_raw.split()[1: ]))
-        proxy = random.choice(proxies)
-        print(f"Proxy: {proxy}")
+        proxy_txt = "proxy_list.txt"
+        with open(proxy_txt, 'r') as f:
+            proxies_raw = f.read()
+        proxies = list(map(lambda s: s.strip(), proxies_raw.split()))
+        proxy = proxies[idx]
+        if Config.use_tor:
+            regex_dict = re.match("socks5://(?P<host>\d+\.\d+\.\d+\.\d+):(?P<port>\d+)", proxy).groupdict()
+            renew_identity_templ = lambda host, port: f""" bash -c 'echo -e "AUTHENTICATE \"\"\r\nsignal NEWNYM\r\nQUIT" | nc {host} {int(port) + 1}' """
+            BaseExecutor.run_command(renew_identity_templ(regex_dict['host'], regex_dict['port']))
+        time.sleep(10)  # wait for new proxy
+        print(f"Generated proxy: {proxy}")
         return proxy
-
+    
+    """
     @staticmethod
     def generate_proxy_old():
         if not Config.use_proxy:
@@ -29,7 +36,7 @@ class ProxyService:
         proxies = [p[ :p.index(' ')] for p in raw_proxies if "-S" in p and " +" in p]
         proxy = random.choice(proxies)
         return proxy
-
+    """
 
 if __name__ == '__main__':
     ip_command = "curl https://api.ipify.org"

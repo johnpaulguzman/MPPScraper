@@ -1,37 +1,42 @@
-import multiprocessing_utils
+import multiprocessing_utils as mpu
+import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.proxy import Proxy, ProxyType
 
 import itertools
-import json
 import multiprocessing as mp
+import random
 import time
+import json
+import os
 
 from Config import Config
 from ProxyService import ProxyService
 
 
-thread_local = multiprocessing_utils.local()
-
 class CommandContext:
-    def __init__(self, initialize, execution_plan):
-        self.initialize = initialize
+    thread_local = mpu.local()
+
+    def __init__(self, create_cache, destroy_cache, execution_plan):
+        self.create_cache = create_cache
+        self.destroy_cache = destroy_cache
         self.execution_plan = execution_plan
 
 class CommandTemplate:
-    def __init__(self, template, *var_generators, nested=False):
+    def __init__(self, template, *var_generators, nested=False, limit=None):
         self.template = template
         self.var_generators = var_generators
         self.nested = nested
+        self.limit = limit
 
     def build(self):
         var_combinations = itertools.product(*self.var_generators)
         if self.nested:  # flatten the stream via itertools.chain.from_iterable
             var_combinations = map(itertools.chain.from_iterable, var_combinations)
         args = itertools.starmap(self.template, var_combinations)
-        args = tuple(args)
+        if self.limit is not None:
+            args = random.choices(list(args), k=self.limit)
         return args
 
 class ContextExecutor():
@@ -40,52 +45,72 @@ class ContextExecutor():
         self.command_context = command_context
         self.workers = workers
 
+    def get_or_create_cache(self):
+        cache = getattr(CommandContext.thread_local, 'cache', None)
+        if cache is None:
+            cache = self.command_context.create_cache()
+            setattr(CommandContext.thread_local, 'cache', cache)
+        return cache
+
+    def repopulate_cache(self):
+        cache = self.get_or_create_cache()
+        self.command_context.destroy_cache(cache)
+        cache = self.command_context.create_cache()
+        setattr(CommandContext.thread_local, 'cache', cache)
+        return cache
+
     def run_commands_split(self, arg):
-        for i in range(Config.max_attempts):
-            output = self.command_context.execution_plan(arg)
-            if output.get('succeeded', False):
+        cache = self.get_or_create_cache()
+        for i in range(1, Config.max_attempts + 1):
+            print(f"<< Running attempt#{i}/{Config.max_attempts} with processes [{arg}].")
+            output = self.command_context.execution_plan(cache, arg)
+            if output is not None:
                 break
-            print(f"** Command failed. Running with a new context...")
-            self.command_context.initialize()
+            print(f"** Command failed. Running with a new context cache ...")
+            cache = self.repopulate_cache()
         print(f"<< Finished attempt#{i}/{Config.max_attempts} with processes [{arg}].")
         return output
 
     def run_commands_on_workers(self):
-        self.run_commands_split(self.args[0]) ######
+        # self.run_commands_split(self.args.__iter__().__next__()) # # # # # # ALLOW INTERACTIVE # # # # # #
         start_time = time.time()
         with mp.Pool(processes=self.workers) as pool:
             print(f">> Multiprocessing pool {(self.workers, pool)} loaded.")
-            results = pool.map(self.run_commands_split, self.args)
+            nested_results = pool.map(self.run_commands_split, self.args)
             print(f"<< Multiprocessing pool {(self.workers, pool)} unloaded.")
         print(f"Duration on workers = {time.time() - start_time}")
+        results = list(itertools.chain.from_iterable(nested_results))
         return results
 
 ###########################################################
 ###########################################################
 ###########################################################
 
-def initialize_driver():
-    global thread_local
-    old_driver = getattr(thread_local, 'driver', None)
-    if old_driver is not None:
-        old_driver.quit()
-    desired_capabilities = webdriver.DesiredCapabilities.CHROME
-    proxy = Proxy()
-    proxy.proxy_type = ProxyType.MANUAL
-    proxy.http_proxy = proxy.ssl_proxy = ProxyService.generate_proxy()
-    proxy.add_to_capabilities(desired_capabilities)
-    chrome_options = Options()
-    #chrome_options.add_argument("--headless")
-    new_driver = webdriver.Chrome(desired_capabilities=desired_capabilities, options=chrome_options)
-    setattr(thread_local, 'driver', new_driver)
-    return new_driver
+def get_process_idx():
+    raw_idx = mp.current_process()._identity
+    if raw_idx is None or raw_idx == tuple():
+        return 0
+    return raw_idx[0] - 1
+
+def create_driver():
+    options = Options()
+    # options.add_argument('--headless')
+    if Config.use_proxy:
+        idx = get_process_idx()
+        proxy = ProxyService.generate_proxy(idx=idx)
+        options.add_argument(f'--proxy-server={proxy}')
+    driver = webdriver.Chrome(options=options)
+    return driver
+
+def delete_driver(driver):
+    driver.quit()
 
 def wait_page_loading(driver):
     WebDriverWait(driver, 60).until(lambda d: d.execute_script('return document.readyState') == 'complete')
-    time.sleep(15)  # probably unnecessary
+    time.sleep(30)  # probably unnecessary
 
 def check_detected_as_bot(driver):
-    if driver.find_elements_by_css_selector('div#px-captcha'):
+    if "/bots." in driver.current_url or "/bots/" in driver.current_url:
         raise Exception("Detected as bot!")
 
 def click_popups(driver):
@@ -120,23 +145,24 @@ def extract_ticket_details(driver):
         } for ticket in tickets]
     return ticket_details
 
-def driver_execution(url):
-    driver = initialize_driver()
+def driver_execution_plan(driver, url):
     try:
+        # driver.get("http://ifconfig.me")
         driver.get(url)
-        wait_page_loading(driver)
-        check_detected_as_bot(driver)
-        click_popups(driver)
+        for REDUNDANT_CODE in range(2):  # ?????????????????????????????????????????????????????????????????????
+            check_detected_as_bot(driver)
+            wait_page_loading(driver)
+            click_popups(driver)
         ticket_details = extract_ticket_details(driver)
         return ticket_details
     except Exception as e:
+        print(f"Exception in driver: {e}")
         driver.quit()
-        raise e
+        return None
 
-command_context = CommandContext(initialize_driver, driver_execution)
+command_context = CommandContext(create_driver, delete_driver, driver_execution_plan)
 
 ###########################################################
-# TODO WORK 
 
 def tuple_stats(name, generator, peek=2):
     tup = tuple(generator)
@@ -147,7 +173,7 @@ code_csv = pd.read_csv("airport_codes.csv")
 code_range = code_csv['Code'].to_list()
 code_combinations = ((c1, c2) for c1 in code_range for c2 in code_range if c1 != c2)
 
-(range_days, range_weeks, range_months) = (0, 1, 0)
+(range_days, range_weeks, range_months) = (0, 0, 1)
 date_start = pd.to_datetime('today')
 date_end = date_start + pd.DateOffset(days=range_days, weeks=range_weeks, months=range_months)
 date_range = pd.date_range(date_start, date_end)
@@ -155,12 +181,10 @@ roundtrip_combinations = ((str(d1.date()), str(d2.date())) for d1 in date_range 
 oneway_combinations = ((str(d.date()), None) for d in date_range)
 date_combinations = itertools.chain(oneway_combinations, roundtrip_combinations)
 
-### cabin_class_combinations = (('economy', ), ('premium', ), ('business', ), ('first', ))
-cabin_class_combinations = (('economy', ), ) ###### TEMP LIMIT ######
+cabin_class_combinations = (('economy', ), ('premium', ), ('business', ), ('first', ))
 
-### max_adults = 9
-### max_children = 7
-(max_adults, max_children) = (3, 2)  ###### TEMP LIMIT ######
+max_adults = 9
+max_children = 7
 adults_range = range(0, max_adults + 1)
 seniors_range = range(0, max_adults + 1)
 lap_infants_range = range(0, max_children + 1)
@@ -175,7 +199,8 @@ travellers_combinations = ((adult, senior, lap_infant, seat_infant, child, youth
                             for child in child_range \
                             for youth in youth_range \
                             if 0 < (adult + senior) <= max_adults and \
-                                (lap_infant + seat_infant + child + youth) <= max_children)
+                                (lap_infant + seat_infant + child + youth) <= max_children and \
+                                lap_infant <= (adult + senior))
 
 max_carryon_bags = 1
 max_checked_bags = 2
@@ -189,15 +214,10 @@ cabin_class_combinations = tuple_stats("cabin_class_combinations", cabin_class_c
 travellers_combinations = tuple_stats("travellers_combinations", travellers_combinations)
 bags_combinations = tuple_stats("bags_combinations", bags_combinations)
 
-code_combinations = random.sample(code_combinations, 1)#5)
-date_combinations = random.sample(date_combinations, 1)#4)
-cabin_class_combinations = random.sample(cabin_class_combinations, 1)
-travellers_combinations = random.sample(travellers_combinations, 1)#3)
-bags_combinations = random.sample(bags_combinations, 1)
-
 codes_templ = lambda code_origin, code_destination: f"{code_origin}-{code_destination}"
 dates_templ = lambda date_departure, date_return: f"{date_departure}" if date_return is None else f"{date_departure}/{date_return}"
-travellers_templ = lambda adults, seniors, lap_infants, seat_infants, children, youth: f"{adults}adults/{seniors}seniors/children{'-1S' * seat_infants}{'-1L' * lap_infants}{'-11' * children}{'-17' * youth}"
+children_templ = lambda lap_infants, seat_infants, children, youth: "" if (lap_infants + seat_infants + children + youth) == 0 else f"children{'-1S' * seat_infants}{'-1L' * lap_infants}{'-11' * children}{'-17' * youth}"
+travellers_templ = lambda adults, seniors, lap_infants, seat_infants, children, youth: f"{adults}adults/{seniors}seniors/{children_templ(lap_infants, seat_infants, children, youth)}"
 bags_templ = lambda carryon_bags, checked_bags: f"fs=cfc={carryon_bags};bfc={checked_bags}"
 def search_templ(code_origin, code_destination, date_departure, date_return, cabin_class, adults, seniors, \
         lap_infants, seat_infants, children, youth, carryon_bags, checked_bags, sort='price_a'):
@@ -208,15 +228,27 @@ def search_templ(code_origin, code_destination, date_departure, date_return, cab
     bags = bags_templ(carryon_bags, checked_bags)
     return f"https://www.kayak.com/flights/{codes}/{dates}/{cabin_class}/{travellers}?{bags}&sort={sort}"
 
-command_templ = CommandTemplate(search_templ, code_combinations, date_combinations, \
-    cabin_class_combinations, travellers_combinations, bags_combinations, nested=True)
-search_combinations = command_templ.build()
-search_combinations = tuple_stats("search_combinations", search_combinations)
+# """ Filter possible combinations
+code_combinations = filter(lambda cc: cc[0] == 'MNL', code_combinations)
+date_combinations = filter(lambda dc: True, date_combinations)
+cabin_class_combinations = filter(lambda ccc: ccc == ('economy', ), cabin_class_combinations)
+travellers_combinations = filter(lambda tc: tc == (1, 0, 0, 0, 0, 0), travellers_combinations)
+bags_combinations = filter(lambda bags: bags == (0, 0), bags_combinations)
+# """
+nested = True
+limit = 4  # 9
+command_templ = CommandTemplate(search_templ, code_combinations, date_combinations, cabin_class_combinations, travellers_combinations, bags_combinations, nested=nested, limit=limit)
 
-###########################################################
-
-workers = 2
+workers = 2  # 3
 context_executor = ContextExecutor(command_templ, command_context, workers)
 results = context_executor.run_commands_on_workers()
-print(f"Results = {results}\nSuccesses: {sum([r['returncode'] == 0 for r in results])}/{len(results)}")
+
+out_path = os.path.join(Config.data_path, "kayak_dump.json")
+with open(out_path, 'w', encoding='utf-8') as out_file:
+    json.dump(results, out_file, indent=4)
+    print(f"Results written to: {out_path}")
+
+# 4 on 2 workers ~ 960 sec due to bot detections
+
 import code; code.interact(local={**locals(), **globals()}) ## INTERACT
+
