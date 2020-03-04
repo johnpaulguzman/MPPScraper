@@ -21,3 +21,11 @@ Bridge 5.34.183.107:443 7605099A04A795686BB5B0C1890B65EC6749F31B
 ## Add new bridges from https://bridges.torproject.org/bridges ##
 
 UseBridges 1
+
+# Or run as:
+# tor \
+#   --SOCKSPort 9050 \
+#   --ControlPort 9051 \
+#   --DataDirectory '/Users/jpg/Library/Application Support/TorBrowser-Data/Tor9050' \
+#   --GeoIPFile '/Users/jpg/Library/Application Support/TorBrowser-Data/Tor9050/geoip' \
+#   --GeoIPv6File '/Users/jpg/Library/Application Support/TorBrowser-Data/Tor9050/geoip6'
